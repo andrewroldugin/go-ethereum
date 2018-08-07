@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -33,6 +34,13 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/netutil"
 
 	"github.com/nictuku/dht"
+)
+
+const (
+	httpPortTCP = 8711
+	numTarget   = 10
+	exampleIH   = "deca7a89a1dbdc4b213de1c0d5351e92582f31fb" // ubuntu-12.04.4-desktop-amd64.iso
+	hash        = "9856b70f40f3244eac1ada9cbbae32ded1aa70f8"
 )
 
 func main() {
@@ -53,12 +61,10 @@ func main() {
 		err     error
 	)
 	flag.Parse()
-
 	glogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
 	glogger.Verbosity(log.Lvl(*verbosity))
 	glogger.Vmodule(*vmodule)
 	log.Root().SetHandler(glogger)
-
 	natm, err := nat.Parse(*natdesc)
 	if err != nil {
 		utils.Fatalf("-nat: %v", err)
@@ -104,6 +110,49 @@ func main() {
 	if err != nil {
 		utils.Fatalf("-ResolveUDPAddr: %v", err)
 	}
+
+	if *kademlia {
+		conf := dht.NewConfig()
+		if addr.IP != nil {
+			conf.Address = addr.IP.String()
+		}
+		conf.Port = addr.Port
+		d, err := dht.New(conf)
+		if err != nil {
+			utils.Fatalf("%v", err)
+		}
+		if err = d.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "DHT start error: %v", err)
+			os.Exit(1)
+		}
+		go drainresults(d)
+
+		infoHash, _ := dht.DecodeInfoHash(hash)
+		for {
+			d.PeersRequest(string(infoHash), false)
+			time.Sleep(5 * time.Second)
+		}
+	} else if *runv5 {
+		conn, realaddr := createconn(addr, natm)
+		if _, err := discv5.ListenUDP(nodeKey, conn, realaddr, "", restrictList); err != nil {
+			utils.Fatalf("%v", err)
+		}
+	} else {
+		conn, realaddr := createconn(addr, natm)
+		cfg := discover.Config{
+			PrivateKey:   nodeKey,
+			AnnounceAddr: realaddr,
+			NetRestrict:  restrictList,
+		}
+		if _, err := discover.ListenUDP(conn, cfg); err != nil {
+			utils.Fatalf("%v", err)
+		}
+	}
+
+	select {}
+}
+
+func createconn(addr *net.UDPAddr, natm nat.Interface) (*net.UDPConn, *net.UDPAddr) {
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		utils.Fatalf("-ListenUDP: %v", err)
@@ -120,32 +169,24 @@ func main() {
 		}
 	}
 
-	if *kademlia {
-		if _, err := dht.New(nil); err != nil {
-			utils.Fatalf("%v", err)
-		}
-		//d.Start()
-		/*
-			if err = d.Start(); err != nil {
-				fmt.Fprintf(os.Stderr, "DHT start error: %v", err)
-				os.Exit(1)
-			}
+	return conn, realaddr
+}
 
-		*/
-	} else if *runv5 {
-		if _, err := discv5.ListenUDP(nodeKey, conn, realaddr, "", restrictList); err != nil {
-			utils.Fatalf("%v", err)
-		}
-	} else {
-		cfg := discover.Config{
-			PrivateKey:   nodeKey,
-			AnnounceAddr: realaddr,
-			NetRestrict:  restrictList,
-		}
-		if _, err := discover.ListenUDP(conn, cfg); err != nil {
-			utils.Fatalf("%v", err)
+// drainresults loops, printing the address of nodes it has found.
+func drainresults(n *dht.DHT) {
+	count := 0
+	fmt.Println("=========================== DHT")
+	fmt.Println("Note that there are many bad nodes that reply to anything you ask.")
+	fmt.Println("Peers found:")
+	for r := range n.PeersRequestResults {
+		for _, peers := range r {
+			for _, x := range peers {
+				fmt.Printf("%d: %v\n", count, dht.DecodePeerAddress(x))
+				count++
+				if count >= numTarget {
+					os.Exit(0)
+				}
+			}
 		}
 	}
-
-	select {}
 }
